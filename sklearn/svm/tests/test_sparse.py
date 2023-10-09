@@ -9,10 +9,10 @@ from sklearn.exceptions import ConvergenceWarning
 from sklearn.svm.tests import test_svm
 from sklearn.utils._testing import ignore_warnings, skip_if_32bit
 from sklearn.utils.extmath import safe_sparse_dot
+from sklearn.utils.fixes import CSR_CONTAINERS, DOK_CONTAINERS, LIL_CONTAINERS
 
 # test sample 1
 X = np.array([[-2, -1], [-1, -1], [-1, -2], [1, 1], [1, 2], [2, 1]])
-X_sp = sparse.lil_matrix(X)
 Y = [1, 1, 1, 2, 2, 2]
 T = np.array([[-1, -1], [2, 2], [3, 2]])
 true_result = [1, 2, 2]
@@ -27,7 +27,6 @@ X2 = np.array(
         [3, 3, 3],
     ]
 )
-X2_sp = sparse.dok_matrix(X2)
 Y2 = [1, 2, 2, 2, 3]
 T2 = np.array([[-1, -1, -1], [1, 1, 1], [2, 2, 2]])
 true_result2 = [1, 2, 3]
@@ -39,12 +38,16 @@ rng = np.random.RandomState(0)
 perm = rng.permutation(iris.target.size)
 iris.data = iris.data[perm]
 iris.target = iris.target[perm]
-# sparsify
-iris.data = sparse.csr_matrix(iris.data)
+
+X_blobs, y_blobs = make_blobs(n_samples=100, centers=10, random_state=0)
 
 
-def check_svm_model_equal(dense_svm, sparse_svm, X_train, y_train, X_test):
-    dense_svm.fit(X_train.toarray(), y_train)
+def check_svm_model_equal(svm_model, X_train, y_train, X_test):
+    # Use the original svm model for dense fit and clone an exactly same
+    # svm model for sparse fit
+    sparse_svm = base.clone(svm_model)
+
+    svm_model.fit(X_train.toarray(), y_train)
     if sparse.issparse(X_test):
         X_test_dense = X_test.toarray()
     else:
@@ -53,77 +56,71 @@ def check_svm_model_equal(dense_svm, sparse_svm, X_train, y_train, X_test):
     assert sparse.issparse(sparse_svm.support_vectors_)
     assert sparse.issparse(sparse_svm.dual_coef_)
     assert_array_almost_equal(
-        dense_svm.support_vectors_, sparse_svm.support_vectors_.toarray()
+        svm_model.support_vectors_, sparse_svm.support_vectors_.toarray()
     )
-    assert_array_almost_equal(dense_svm.dual_coef_, sparse_svm.dual_coef_.toarray())
-    if dense_svm.kernel == "linear":
+    assert_array_almost_equal(svm_model.dual_coef_, sparse_svm.dual_coef_.toarray())
+    if svm_model.kernel == "linear":
         assert sparse.issparse(sparse_svm.coef_)
-        assert_array_almost_equal(dense_svm.coef_, sparse_svm.coef_.toarray())
-    assert_array_almost_equal(dense_svm.support_, sparse_svm.support_)
+        assert_array_almost_equal(svm_model.coef_, sparse_svm.coef_.toarray())
+    assert_array_almost_equal(svm_model.support_, sparse_svm.support_)
     assert_array_almost_equal(
-        dense_svm.predict(X_test_dense), sparse_svm.predict(X_test)
+        svm_model.predict(X_test_dense), sparse_svm.predict(X_test)
     )
     assert_array_almost_equal(
-        dense_svm.decision_function(X_test_dense), sparse_svm.decision_function(X_test)
+        svm_model.decision_function(X_test_dense), sparse_svm.decision_function(X_test)
     )
     assert_array_almost_equal(
-        dense_svm.decision_function(X_test_dense),
+        svm_model.decision_function(X_test_dense),
         sparse_svm.decision_function(X_test_dense),
     )
-    if isinstance(dense_svm, svm.OneClassSVM):
+    if isinstance(svm_model, svm.OneClassSVM):
         msg = "cannot use sparse input in 'OneClassSVM' trained on dense data"
     else:
         assert_array_almost_equal(
-            dense_svm.predict_proba(X_test_dense), sparse_svm.predict_proba(X_test), 4
+            svm_model.predict_proba(X_test_dense), sparse_svm.predict_proba(X_test), 4
         )
         msg = "cannot use sparse input in 'SVC' trained on dense data"
     if sparse.issparse(X_test):
         with pytest.raises(ValueError, match=msg):
-            dense_svm.predict(X_test)
+            svm_model.predict(X_test)
 
 
 @skip_if_32bit
-def test_svc():
-    """Check that sparse SVC gives the same result as SVC"""
-    # many class dataset:
-    X_blobs, y_blobs = make_blobs(n_samples=100, centers=10, random_state=0)
-    X_blobs = sparse.csr_matrix(X_blobs)
-
-    datasets = [
-        [X_sp, Y, T],
-        [X2_sp, Y2, T2],
+@pytest.mark.parametrize(
+    "X_train, y_train, X_test",
+    [
+        [X, Y, T],
+        [X2, Y2, T2],
         [X_blobs[:80], y_blobs[:80], X_blobs[80:]],
         [iris.data, iris.target, iris.data],
-    ]
-    kernels = ["linear", "poly", "rbf", "sigmoid"]
-    for dataset in datasets:
-        for kernel in kernels:
-            clf = svm.SVC(
-                gamma=1,
-                kernel=kernel,
-                probability=True,
-                random_state=0,
-                decision_function_shape="ovo",
-            )
-            sp_clf = svm.SVC(
-                gamma=1,
-                kernel=kernel,
-                probability=True,
-                random_state=0,
-                decision_function_shape="ovo",
-            )
-            check_svm_model_equal(clf, sp_clf, *dataset)
+    ],
+)
+@pytest.mark.parametrize("kernel", ["linear", "poly", "rbf", "sigmoid"])
+@pytest.mark.parametrize("sparse_container", CSR_CONTAINERS + LIL_CONTAINERS)
+def test_svc(X_train, y_train, X_test, kernel, sparse_container):
+    """Check that sparse SVC gives the same result as SVC."""
+    X_train = sparse_container(X_train)
+
+    clf = svm.SVC(
+        gamma=1,
+        kernel=kernel,
+        probability=True,
+        random_state=0,
+        decision_function_shape="ovo",
+    )
+    check_svm_model_equal(clf, X_train, y_train, X_test)
 
 
-def test_unsorted_indices():
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+def test_unsorted_indices(csr_container):
     # test that the result with sorted and unsorted indices in csr is the same
     # we use a subset of digits as iris, blobs or make_classification didn't
     # show the problem
     X, y = load_digits(return_X_y=True)
-    X_test = sparse.csr_matrix(X[50:100])
+    X_test = csr_container(X[50:100])
     X, y = X[:50], y[:50]
 
-    X_sparse = sparse.csr_matrix(X)
+    X_sparse = csr_container(X)
     coef_dense = (
         svm.SVC(kernel="linear", probability=True, random_state=0).fit(X, y).coef_
     )
@@ -142,7 +139,7 @@ def test_unsorted_indices():
             row_slice = slice(*X.indptr[i - 1 : i + 1])
             new_data.extend(X.data[row_slice][::-1])
             new_indices.extend(X.indices[row_slice][::-1])
-        return sparse.csr_matrix((new_data, new_indices, X.indptr), shape=X.shape)
+        return csr_container((new_data, new_indices, X.indptr), shape=X.shape)
 
     X_sparse_unsorted = scramble_indices(X_sparse)
     X_test_unsorted = scramble_indices(X_test)
@@ -161,18 +158,22 @@ def test_unsorted_indices():
     )
 
 
-def test_svc_with_custom_kernel():
+@pytest.mark.parametrize("lil_container", LIL_CONTAINERS)
+def test_svc_with_custom_kernel(lil_container):
     def kfunc(x, y):
         return safe_sparse_dot(x, y.T)
 
+    X_sp = lil_container(X)
     clf_lin = svm.SVC(kernel="linear").fit(X_sp, Y)
     clf_mylin = svm.SVC(kernel=kfunc).fit(X_sp, Y)
     assert_array_equal(clf_lin.predict(X_sp), clf_mylin.predict(X_sp))
 
 
 @skip_if_32bit
-def test_svc_iris():
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+def test_svc_iris(csr_container):
     # Test the sparse SVC with the iris dataset
+    iris.data = csr_container(iris.data)
     for k in ("linear", "poly", "rbf"):
         sp_clf = svm.SVC(kernel=k).fit(iris.data, iris.target)
         clf = svm.SVC(kernel=k).fit(iris.data.toarray(), iris.target)
@@ -188,13 +189,15 @@ def test_svc_iris():
             assert_array_almost_equal(clf.coef_, sp_clf.coef_.toarray())
 
 
-def test_sparse_decision_function():
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+def test_sparse_decision_function(csr_container):
     # Test decision_function
 
     # Sanity check, test that decision_function implemented in python
     # returns the same as the one in libsvm
 
     # multi class:
+    iris.data = csr_container(iris.data)
     svc = svm.SVC(kernel="linear", C=0.1, decision_function_shape="ovo")
     clf = svc.fit(iris.data, iris.target)
 
@@ -214,10 +217,11 @@ def test_sparse_decision_function():
     assert_array_almost_equal(clf.decision_function(X), expected, 2)
 
 
-def test_error():
+@pytest.mark.parametrize("lil_container", LIL_CONTAINERS)
+def test_error(lil_container):
     # Test that it gives proper exception on deficient input
     clf = svm.SVC()
-
+    X_sp = lil_container(X)
     Y2 = Y[:-1]  # wrong dimensions for labels
     with pytest.raises(ValueError):
         clf.fit(X_sp, Y2)
@@ -226,8 +230,11 @@ def test_error():
     assert_array_equal(clf.predict(T), true_result)
 
 
-def test_linearsvc():
+@pytest.mark.parametrize("sparse_container", LIL_CONTAINERS + DOK_CONTAINERS)
+def test_linearsvc(sparse_container):
     # Similar to test_SVC
+    X_sp = sparse_container(X)
+    X2_sp = sparse_container(X2)
     clf = svm.LinearSVC(dual="auto", random_state=0).fit(X, Y)
     sp_clf = svm.LinearSVC(dual="auto", random_state=0).fit(X_sp, Y)
 
@@ -245,9 +252,10 @@ def test_linearsvc():
     assert_array_almost_equal(clf.intercept_, sp_clf.intercept_, decimal=4)
 
 
-def test_linearsvc_iris():
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+def test_linearsvc_iris(csr_container):
     # Test the sparse LinearSVC with the iris dataset
-
+    iris.data = csr_container(iris.data)
     sp_clf = svm.LinearSVC(dual="auto", random_state=0).fit(iris.data, iris.target)
     clf = svm.LinearSVC(dual="auto", random_state=0).fit(
         iris.data.toarray(), iris.target
@@ -273,13 +281,14 @@ def test_linearsvc_iris():
     assert_array_equal(pred, sp_clf.predict(iris.data))
 
 
-def test_weight():
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+def test_weight(csr_container):
     # Test class weights
     X_, y_ = make_classification(
         n_samples=200, n_features=100, weights=[0.833, 0.167], random_state=0
     )
 
-    X_ = sparse.csr_matrix(X_)
+    X_ = csr_container(X_)
     for clf in (
         linear_model.LogisticRegression(),
         svm.LinearSVC(dual="auto", random_state=0),
@@ -291,9 +300,11 @@ def test_weight():
         assert np.sum(y_pred == y_[180:]) >= 11
 
 
-def test_sample_weights():
+@pytest.mark.parametrize("lil_container", LIL_CONTAINERS)
+def test_sample_weights(lil_container):
     # Test weights on individual samples
     clf = svm.SVC()
+    X_sp = lil_container(X)
     clf.fit(X_sp, Y)
     assert_array_equal(clf.predict([X[2]]), [1.0])
 
@@ -307,27 +318,28 @@ def test_sparse_liblinear_intercept_handling():
     test_svm.test_dense_liblinear_intercept_handling(svm.LinearSVC)
 
 
-@pytest.mark.parametrize("datasets_index", range(4))
-@pytest.mark.parametrize("kernel", ["linear", "poly", "rbf", "sigmoid"])
-@skip_if_32bit
-def test_sparse_oneclasssvm(datasets_index, kernel):
-    # Check that sparse OneClassSVM gives the same result as dense OneClassSVM
-    # many class dataset:
-    X_blobs, _ = make_blobs(n_samples=100, centers=10, random_state=0)
-    X_blobs = sparse.csr_matrix(X_blobs)
-    datasets = [
-        [X_sp, None, T],
-        [X2_sp, None, T2],
+@pytest.mark.parametrize(
+    "X_train, y_train, X_test",
+    [
+        [X, None, T],
+        [X2, None, T2],
         [X_blobs[:80], None, X_blobs[80:]],
         [iris.data, None, iris.data],
-    ]
-    dataset = datasets[datasets_index]
+    ],
+)
+@pytest.mark.parametrize("kernel", ["linear", "poly", "rbf", "sigmoid"])
+@pytest.mark.parametrize("sparse_container", CSR_CONTAINERS + LIL_CONTAINERS)
+@skip_if_32bit
+def test_sparse_oneclasssvm(X_train, y_train, X_test, kernel, sparse_container):
+    # Check that sparse OneClassSVM gives the same result as dense OneClassSVM
+    X_train = sparse_container(X_train)
+
     clf = svm.OneClassSVM(gamma=1, kernel=kernel)
-    sp_clf = svm.OneClassSVM(gamma=1, kernel=kernel)
-    check_svm_model_equal(clf, sp_clf, *dataset)
+    check_svm_model_equal(clf, X_train, y_train, X_test)
 
 
-def test_sparse_realdata():
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+def test_sparse_realdata(csr_container):
     # Test on a subset from the 20newsgroups dataset.
     # This catches some bugs if input is not correctly converted into
     # sparse format or weights are not correctly initialized.
@@ -419,7 +431,7 @@ def test_sparse_realdata():
             4,
         ]
     )
-    X = sparse.csr_matrix((data, indices, indptr))
+    X = csr_container((data, indices, indptr))
     y = np.array(
         [
             1.0,
@@ -506,34 +518,39 @@ def test_sparse_realdata():
     )
 
     clf = svm.SVC(kernel="linear").fit(X.toarray(), y)
-    sp_clf = svm.SVC(kernel="linear").fit(sparse.coo_matrix(X), y)
+    sp_clf = svm.SVC(kernel="linear").fit(X.tocoo(), y)
 
     assert_array_equal(clf.support_vectors_, sp_clf.support_vectors_.toarray())
     assert_array_equal(clf.dual_coef_, sp_clf.dual_coef_.toarray())
 
 
-def test_sparse_svc_clone_with_callable_kernel():
+@pytest.mark.parametrize("lil_container", LIL_CONTAINERS)
+def test_sparse_svc_clone_with_callable_kernel(lil_container):
     # Test that the "dense_fit" is called even though we use sparse input
     # meaning that everything works fine.
-    a = svm.SVC(C=1, kernel=lambda x, y: x * y.T, probability=True, random_state=0)
+    a = svm.SVC(C=1, kernel=lambda x, y: x @ y.T, probability=True, random_state=0)
     b = base.clone(a)
+
+    X_sp = lil_container(X)
 
     b.fit(X_sp, Y)
     pred = b.predict(X_sp)
     b.predict_proba(X_sp)
 
     dense_svm = svm.SVC(
-        C=1, kernel=lambda x, y: np.dot(x, y.T), probability=True, random_state=0
+        C=1, kernel=lambda x, y: x @ y.T, probability=True, random_state=0
     )
     pred_dense = dense_svm.fit(X, Y).predict(X)
     assert_array_equal(pred_dense, pred)
     # b.decision_function(X_sp)  # XXX : should be supported
 
 
-def test_timeout():
+@pytest.mark.parametrize("lil_container", LIL_CONTAINERS)
+def test_timeout(lil_container):
     sp = svm.SVC(
-        C=1, kernel=lambda x, y: x * y.T, probability=True, random_state=0, max_iter=1
+        C=1, kernel=lambda x, y: x @ y.T, probability=True, random_state=0, max_iter=1
     )
+    X_sp = lil_container(X)
     warning_msg = (
         r"Solver terminated early \(max_iter=1\).  Consider pre-processing "
         r"your data with StandardScaler or MinMaxScaler."
