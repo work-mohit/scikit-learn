@@ -116,9 +116,12 @@ def _brute_mst(mutual_reachability, min_samples):
         raise ValueError(
             f"There exists points with fewer than {min_samples} neighbors. Ensure"
             " your distance matrix has non-zero values for at least"
-            f" `min_sample`={min_samples} neighbors for each points (i.e. K-nn"
-            " graph), or specify a `max_distance` in `metric_params` to use when"
-            " distances are missing."
+            f" `min_sample`={min_samples} neighbors for each points (i.e. K-nn graph),"
+            " or specify a `max_distance` in `metric_params` to use when distances are"
+            " missing.This issue may arise even if there are more than `min_samples`"
+            " neighbors for all samples.HDBSCAN clustering requires a connected data"
+            " or distance matrix. Please ensure that your data or distance matrix is"
+            " connected for HDBSCAN to work correctly. "
         )
 
     # Compute the minimum spanning tree for the sparse graph
